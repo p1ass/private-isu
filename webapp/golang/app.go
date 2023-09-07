@@ -1,8 +1,15 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
 	"fmt"
+	"github.com/riandyrn/otelchi"
+	"github.com/uptrace/opentelemetry-go-extra/otelsql"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"html/template"
 	"io"
 	"log"
@@ -22,6 +29,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 var (
@@ -94,9 +102,9 @@ func dbInitialize() {
 	}
 }
 
-func tryLogin(accountName, password string) *User {
+func tryLogin(ctx context.Context, accountName, password string) *User {
 	u := User{}
-	err := db.Get(&u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0", accountName)
+	err := db.GetContext(ctx, &u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0", accountName)
 	if err != nil {
 		return nil
 	}
@@ -154,7 +162,7 @@ func getSessionUser(r *http.Request) User {
 
 	u := User{}
 
-	err := db.Get(&u, "SELECT * FROM `users` WHERE `id` = ?", uid)
+	err := db.GetContext(r.Context(), &u, "SELECT * FROM `users` WHERE `id` = ?", uid)
 	if err != nil {
 		return User{}
 	}
@@ -175,11 +183,11 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 	}
 }
 
-func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, error) {
+func makePosts(ctx context.Context, results []Post, csrfToken string, allComments bool) ([]Post, error) {
 	var posts []Post
 
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+		err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -189,13 +197,13 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 			query += " LIMIT 3"
 		}
 		var comments []Comment
-		err = db.Select(&comments, query, p.ID)
+		err = db.SelectContext(ctx, &comments, query, p.ID)
 		if err != nil {
 			return nil, err
 		}
 
 		for i := 0; i < len(comments); i++ {
-			err := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
+			err := db.GetContext(ctx, &comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
 			if err != nil {
 				return nil, err
 			}
@@ -208,7 +216,7 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 
 		p.Comments = comments
 
-		err = db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
+		err = db.GetContext(ctx, &p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
 		if err != nil {
 			return nil, err
 		}
@@ -292,7 +300,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := tryLogin(r.FormValue("account_name"), r.FormValue("password"))
+	u := tryLogin(r.Context(), r.FormValue("account_name"), r.FormValue("password"))
 
 	if u != nil {
 		session := getSession(r)
@@ -345,7 +353,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 
 	exists := 0
 	// ユーザーが存在しない場合はエラーになるのでエラーチェックはしない
-	db.Get(&exists, "SELECT 1 FROM users WHERE `account_name` = ?", accountName)
+	db.GetContext(r.Context(), &exists, "SELECT 1 FROM users WHERE `account_name` = ?", accountName)
 
 	if exists == 1 {
 		session := getSession(r)
@@ -357,7 +365,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := "INSERT INTO `users` (`account_name`, `passhash`) VALUES (?,?)"
-	result, err := db.Exec(query, accountName, calculatePasshash(accountName, password))
+	result, err := db.ExecContext(r.Context(), query, accountName, calculatePasshash(accountName, password))
 	if err != nil {
 		log.Print(err)
 		return
@@ -390,13 +398,13 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
+	err := db.SelectContext(r.Context(), &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
 	if err != nil {
 		log.Print(err)
 		return
 	}
 
-	posts, err := makePosts(results, getCSRFToken(r), false)
+	posts, err := makePosts(r.Context(), results, getCSRFToken(r), false)
 	if err != nil {
 		log.Print(err)
 		return
@@ -423,7 +431,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 	accountName := chi.URLParam(r, "accountName")
 	user := User{}
 
-	err := db.Get(&user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0", accountName)
+	err := db.GetContext(r.Context(), &user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0", accountName)
 	if err != nil {
 		log.Print(err)
 		return
@@ -436,27 +444,27 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	err = db.SelectContext(r.Context(), &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
 	if err != nil {
 		log.Print(err)
 		return
 	}
 
-	posts, err := makePosts(results, getCSRFToken(r), false)
+	posts, err := makePosts(r.Context(), results, getCSRFToken(r), false)
 	if err != nil {
 		log.Print(err)
 		return
 	}
 
 	commentCount := 0
-	err = db.Get(&commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
+	err = db.GetContext(r.Context(), &commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
 	if err != nil {
 		log.Print(err)
 		return
 	}
 
 	postIDs := []int{}
-	err = db.Select(&postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID)
+	err = db.SelectContext(r.Context(), &postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID)
 	if err != nil {
 		log.Print(err)
 		return
@@ -477,7 +485,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 			args[i] = v
 		}
 
-		err = db.Get(&commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...)
+		err = db.GetContext(r.Context(), &commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...)
 		if err != nil {
 			log.Print(err)
 			return
@@ -524,13 +532,13 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
+	err = db.SelectContext(r.Context(), &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
 	if err != nil {
 		log.Print(err)
 		return
 	}
 
-	posts, err := makePosts(results, getCSRFToken(r), false)
+	posts, err := makePosts(r.Context(), results, getCSRFToken(r), false)
 	if err != nil {
 		log.Print(err)
 		return
@@ -560,13 +568,13 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	err = db.SelectContext(r.Context(), &results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
 	if err != nil {
 		log.Print(err)
 		return
 	}
 
-	posts, err := makePosts(results, getCSRFToken(r), true)
+	posts, err := makePosts(r.Context(), results, getCSRFToken(r), true)
 	if err != nil {
 		log.Print(err)
 		return
@@ -653,7 +661,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := "INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)"
-	result, err := db.Exec(
+	result, err := db.ExecContext(r.Context(),
 		query,
 		me.ID,
 		mime,
@@ -683,7 +691,7 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	post := Post{}
-	err = db.Get(&post, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	err = db.GetContext(r.Context(), &post, "SELECT * FROM `posts` WHERE `id` = ?", pid)
 	if err != nil {
 		log.Print(err)
 		return
@@ -725,7 +733,7 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := "INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)"
-	_, err = db.Exec(query, postID, me.ID, r.FormValue("comment"))
+	_, err = db.ExecContext(r.Context(), query, postID, me.ID, r.FormValue("comment"))
 	if err != nil {
 		log.Print(err)
 		return
@@ -747,7 +755,7 @@ func getAdminBanned(w http.ResponseWriter, r *http.Request) {
 	}
 
 	users := []User{}
-	err := db.Select(&users, "SELECT * FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC")
+	err := db.SelectContext(r.Context(), &users, "SELECT * FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC")
 	if err != nil {
 		log.Print(err)
 		return
@@ -789,13 +797,23 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, id := range r.Form["uid[]"] {
-		db.Exec(query, 1, id)
+		db.ExecContext(r.Context(), query, 1, id)
 	}
 
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
 
 func main() {
+	tp, err := initializeTracerProvider()
+	if err != nil {
+		log.Fatalf("Failed to initialize tracer provider: %v", err)
+	}
+	defer func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			log.Printf("Error shutting down tracer provider: %v", err)
+		}
+	}()
+
 	host := os.Getenv("ISUCONP_DB_HOST")
 	if host == "" {
 		host = "localhost"
@@ -804,7 +822,7 @@ func main() {
 	if port == "" {
 		port = "3306"
 	}
-	_, err := strconv.Atoi(port)
+	_, err = strconv.Atoi(port)
 	if err != nil {
 		log.Fatalf("Failed to read DB port number from an environment variable ISUCONP_DB_PORT.\nError: %s", err.Error())
 	}
@@ -827,13 +845,16 @@ func main() {
 		dbname,
 	)
 
-	db, err = sqlx.Open("mysql", dsn)
+	stdDb, err := otelsql.Open("mysql", dsn, otelsql.WithDBName("mysql"))
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
+	db = sqlx.NewDb(stdDb, "mysql")
+
 	defer db.Close()
 
 	r := chi.NewRouter()
+	r.Use(otelchi.Middleware("private-isu", otelchi.WithChiRoutes(r)))
 
 	r.Get("/initialize", getInitialize)
 	r.Get("/login", getLogin)
@@ -855,4 +876,37 @@ func main() {
 	})
 
 	log.Fatal(http.ListenAndServe(":8080", r))
+}
+
+func initializeTracerProvider() (*sdktrace.TracerProvider, error) {
+	res, err := resource.New(context.Background(), resource.WithTelemetrySDK())
+	if err != nil {
+		return nil, fmt.Errorf("faield to create resource: %w", err)
+	}
+
+	tracerProviderOptions := []sdktrace.TracerProviderOption{
+		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(1))),
+		sdktrace.WithResource(res),
+	}
+
+	// ローカルでJaegerが動いてる場合はJaegerにつなぐ
+	ep, ok := os.LookupEnv("JAEGER_ENDPOINT")
+	if ok {
+		exporter, err := jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(ep)))
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize jager: %w", err)
+		}
+		tracerProviderOptions = append(tracerProviderOptions, sdktrace.WithBatcher(exporter))
+	}
+
+	tp := sdktrace.NewTracerProvider(tracerProviderOptions...)
+	otel.SetTracerProvider(tp)
+
+	propagator := propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	)
+	otel.SetTextMapPropagator(propagator)
+
+	return tp, nil
 }
