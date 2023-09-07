@@ -11,7 +11,7 @@ services:
 
   app:
     # Go実装の場合は golang/ PHP実装の場合は php/
-    build: ruby/
+    build: golang/
     environment:
       ISUCONP_DB_HOST: mysql
       ISUCONP_DB_PORT: 3306
@@ -42,7 +42,7 @@ services:
       - ./etc/my.cnf:/etc/my.cnf
       - ./sql:/docker-entrypoint-initdb.d
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     deploy:
       resources:
         limits:
