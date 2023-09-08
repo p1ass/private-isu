@@ -97,6 +97,8 @@ func dbInitialize() {
 		"create index comments_post_id_created_at_index on comments (post_id asc, created_at desc)",
 		"create index comments_user_id_created_at_index on comments (user_id asc, created_at desc)",
 		"create index users_id_del_flg_index on users (id, del_flg)",
+		"create index users_del_flg_index on users (del_flg)",
+		"create index posts_created_at_index on posts (created_at desc)",
 	}
 
 	for _, sql := range sqls {
@@ -495,7 +497,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		results = append(results, Post{
 			ID:           int(p.ID),
 			UserID:       int(p.UserID),
-			Imgdata:      nil, // TODO: ?
+			Imgdata:      nil,
 			Body:         p.Body,
 			Mime:         p.Mime,
 			CreatedAt:    p.CreatedAt,
@@ -644,13 +646,39 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.SelectContext(r.Context(), &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
+
+	usersPosts, err := sqlc.New(db).GetUndeletedUsersPostsWithMaxCreatedAt(r.Context(), sqlc.GetUndeletedUsersPostsWithMaxCreatedAtParams{
+		CreatedAt: t,
+		Limit:     postsPerPage,
+	})
 	if err != nil {
 		log.Print(err)
 		return
 	}
+	csrfToken := getCSRFToken(r)
+	for _, p := range usersPosts {
+		results = append(results, Post{
+			ID:           int(p.ID),
+			UserID:       int(p.UserID),
+			Imgdata:      nil,
+			Body:         p.Body,
+			Mime:         p.Mime,
+			CreatedAt:    p.CreatedAt,
+			CommentCount: 0,   // makeRecentPostで入れる
+			Comments:     nil, // makeRecentPostsで入れる
+			User: User{
+				ID:          int(p.UserID),
+				AccountName: p.AccountName,
+				Passhash:    p.Passhash, // 不要
+				Authority:   boolToInt(p.Authority),
+				DelFlg:      boolToInt(p.DelFlg),
+				CreatedAt:   time.Time{}, // 不要
+			},
+			CSRFToken: csrfToken,
+		})
+	}
 
-	posts, err := makePosts(r.Context(), results, getCSRFToken(r), false)
+	posts, err := makeRecentPosts(r.Context(), results)
 	if err != nil {
 		log.Print(err)
 		return
