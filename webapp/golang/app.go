@@ -4,6 +4,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"fmt"
+	"github.com/catatsuy/private-isu/webapp/golang/sqlc"
 	"github.com/riandyrn/otelchi"
 	"github.com/uptrace/opentelemetry-go-extra/otelsql"
 	"go.opentelemetry.io/otel"
@@ -95,6 +96,7 @@ func dbInitialize() {
 		"create index posts_user_id_created_at_index on posts (user_id asc, created_at desc)",
 		"create index comments_post_id_created_at_index on comments (post_id asc, created_at desc)",
 		"create index comments_user_id_created_at_index on comments (user_id asc, created_at desc)",
+		"create index users_id_del_flg_index on users (id, del_flg)",
 	}
 
 	for _, sql := range sqls {
@@ -183,11 +185,67 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 	}
 }
 
+func makeRecentPosts(ctx context.Context, results []Post) ([]Post, error) {
+	var postIDs []int32
+	for _, p := range results {
+		postIDs = append(postIDs, int32(p.ID))
+	}
+
+	querier := sqlc.New(db)
+	commentsAndUser, err := querier.GetPostRecentCommentsAndUser(ctx, postIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, p := range results {
+		var comments []Comment
+		for _, c := range commentsAndUser {
+			if p.ID == int(c.PostID) {
+				comments = append(comments, Comment{
+					ID:        int(c.ID),
+					PostID:    int(c.PostID),
+					UserID:    int(c.UserID),
+					Comment:   c.Comment,
+					CreatedAt: c.CreatedAt,
+					User: User{
+						ID:          int(c.UserID),
+						AccountName: c.AccountName.String,
+						Passhash:    "",
+						Authority:   boolToInt(c.Authority.Bool),
+						DelFlg:      boolToInt(c.DelFlg.Bool),
+						CreatedAt:   time.Time{},
+					},
+				})
+			}
+		}
+		p.Comments = comments
+
+		err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return results, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	} else {
+		return 0
+	}
+}
+
+// 全てのユーザーの全ての投稿をcreated at descで取得する allComments:false getIndex
+// 指定したユーザー全ての投稿をcreated at descで取得する allComments:false getAccountName
+// 指定した日付より古い投稿をcreated at descで取得する allComments:false getPosts
+// 指定したPostIDの投稿を1つ取得する allComments:true getPostsID
 func makePosts(ctx context.Context, results []Post, csrfToken string, allComments bool) ([]Post, error) {
 	var posts []Post
 
 	for _, p := range results {
-		err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+		err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -202,10 +260,39 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 			return nil, err
 		}
 
-		for i := 0; i < len(comments); i++ {
-			err := db.GetContext(ctx, &comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
+		var userIDs []int
+		for _, c := range comments {
+			userIDs = append(userIDs, c.UserID)
+		}
+		// unique
+		m := map[int]struct{}{}
+		for _, id := range userIDs {
+			m[id] = struct{}{}
+		}
+		userIDs = []int{}
+		for id := range m {
+			userIDs = append(userIDs, id)
+		}
+
+		if len(userIDs) > 0 {
+			var users []User
+			q, parm, err := sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIDs)
 			if err != nil {
 				return nil, err
+			}
+			err = db.SelectContext(ctx, &users, q, parm...)
+			if err != nil {
+				return nil, err
+			}
+
+			// map
+			userMap := map[int]User{}
+			for _, u := range users {
+				userMap[u.ID] = u
+			}
+
+			for i := 0; i < len(comments); i++ {
+				comments[i].User = userMap[comments[i].UserID]
 			}
 		}
 
@@ -398,13 +485,35 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.SelectContext(r.Context(), &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
+	usersPosts, err := sqlc.New(db).GetUndeletedUsersPosts(r.Context(), postsPerPage)
 	if err != nil {
 		log.Print(err)
 		return
 	}
+	csrfToken := getCSRFToken(r)
+	for _, p := range usersPosts {
+		results = append(results, Post{
+			ID:           int(p.ID),
+			UserID:       int(p.UserID),
+			Imgdata:      nil, // TODO: ?
+			Body:         p.Body,
+			Mime:         p.Mime,
+			CreatedAt:    p.CreatedAt,
+			CommentCount: 0,   // makeRecentPostで入れる
+			Comments:     nil, // makeRecentPostsで入れる
+			User: User{
+				ID:          int(p.UserID),
+				AccountName: p.AccountName,
+				Passhash:    p.Passhash, // 不要
+				Authority:   boolToInt(p.Authority),
+				DelFlg:      boolToInt(p.DelFlg),
+				CreatedAt:   time.Time{}, // 不要
+			},
+			CSRFToken: csrfToken,
+		})
+	}
 
-	posts, err := makePosts(r.Context(), results, getCSRFToken(r), false)
+	posts, err := makeRecentPosts(r.Context(), results)
 	if err != nil {
 		log.Print(err)
 		return
@@ -424,7 +533,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		Me        User
 		CSRFToken string
 		Flash     string
-	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
+	}{posts, me, csrfToken, getFlash(w, r, "notice")})
 }
 
 func getAccountName(w http.ResponseWriter, r *http.Request) {
@@ -456,6 +565,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: アプリケーションがわ で計算できそう
 	commentCount := 0
 	err = db.GetContext(r.Context(), &commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
 	if err != nil {
@@ -463,6 +573,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: アプリケーションがわ で計算できそう
 	postIDs := []int{}
 	err = db.SelectContext(r.Context(), &postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID)
 	if err != nil {
@@ -471,6 +582,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 	}
 	postCount := len(postIDs)
 
+	// TODO: アプリケーションがわ で計算できそう
 	commentedCount := 0
 	if postCount > 0 {
 		s := []string{}
