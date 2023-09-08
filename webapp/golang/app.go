@@ -542,7 +542,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 	accountName := chi.URLParam(r, "accountName")
 	user := User{}
 
-	err := db.GetContext(r.Context(), &user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0", accountName)
+	err := db.GetContext(r.Context(), &user, "SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0 LIMIT 1", accountName)
 	if err != nil {
 		log.Print(err)
 		return
@@ -555,21 +555,45 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err = db.SelectContext(r.Context(), &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	usersPosts, err := sqlc.New(db).GetUsersPosts(r.Context(), sqlc.GetUsersPostsParams{
+		ID:    int32(user.ID),
+		Limit: postsPerPage,
+	})
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	csrfToken := getCSRFToken(r)
+	for _, p := range usersPosts {
+		results = append(results, Post{
+			ID:           int(p.ID),
+			UserID:       int(p.UserID),
+			Imgdata:      nil,
+			Body:         p.Body,
+			Mime:         p.Mime,
+			CreatedAt:    p.CreatedAt,
+			CommentCount: 0,   // makeRecentPostで入れる
+			Comments:     nil, // makeRecentPostsで入れる
+			User: User{
+				ID:          int(p.UserID),
+				AccountName: p.AccountName,
+				Passhash:    p.Passhash, // 不要
+				Authority:   boolToInt(p.Authority),
+				DelFlg:      boolToInt(p.DelFlg),
+				CreatedAt:   time.Time{}, // 不要
+			},
+			CSRFToken: csrfToken,
+		})
+	}
+
+	posts, err := makeRecentPosts(r.Context(), results)
 	if err != nil {
 		log.Print(err)
 		return
 	}
 
-	posts, err := makePosts(r.Context(), results, getCSRFToken(r), false)
-	if err != nil {
-		log.Print(err)
-		return
-	}
-
-	// TODO: アプリケーションがわ で計算できそう
 	commentCount := 0
-	err = db.GetContext(r.Context(), &commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
+	err = db.GetContext(r.Context(), &commentCount, "SELECT COUNT(1) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
 	if err != nil {
 		log.Print(err)
 		return
@@ -977,7 +1001,7 @@ func main() {
 	}
 
 	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&loc=Local",
+		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&loc=Local&interpolateParams=true",
 		user,
 		password,
 		host,
@@ -989,6 +1013,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
+	stdDb.SetMaxIdleConns(10)
+	stdDb.SetMaxOpenConns(10)
 	db = sqlx.NewDb(stdDb, "mysql")
 
 	defer db.Close()

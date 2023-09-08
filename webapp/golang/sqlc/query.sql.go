@@ -80,3 +80,63 @@ func (q *Queries) GetPostRecentCommentsAndUser(ctx context.Context, postIds []in
 	}
 	return items, nil
 }
+
+const getUsersPosts = `-- name: GetUsersPosts :many
+SELECT p.id, p.user_id, p.mime, p.body, p.created_at,
+       account_name, passhash, authority, del_flg
+FROM posts as p
+         LEFT JOIN users u force index (users_del_flg_index) on u.id = p.user_id
+WHERE u.id =?
+ORDER BY p.created_at DESC
+LIMIT ?
+`
+
+type GetUsersPostsParams struct {
+	ID    int32
+	Limit int32
+}
+
+type GetUsersPostsRow struct {
+	ID          int32
+	UserID      int32
+	Mime        string
+	Body        string
+	CreatedAt   time.Time
+	AccountName string
+	Passhash    string
+	Authority   bool
+	DelFlg      bool
+}
+
+func (q *Queries) GetUsersPosts(ctx context.Context, arg GetUsersPostsParams) ([]GetUsersPostsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getUsersPosts, arg.ID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetUsersPostsRow
+	for rows.Next() {
+		var i GetUsersPostsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Mime,
+			&i.Body,
+			&i.CreatedAt,
+			&i.AccountName,
+			&i.Passhash,
+			&i.Authority,
+			&i.DelFlg,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
