@@ -35,6 +35,7 @@ import (
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	_ "net/http/pprof"
 )
 
 var (
@@ -166,7 +167,7 @@ func getSessionUser(r *http.Request) User {
 
 	u := User{}
 
-	err := db.GetContext(r.Context(), &u, "SELECT * FROM `users` WHERE `id` = ?", uid)
+	err := db.GetContext(r.Context(), &u, "SELECT * FROM `users` WHERE `id` = ? LIMIT 1", uid)
 	if err != nil {
 		return User{}
 	}
@@ -554,22 +555,22 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("index.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	getIndexTemplate.Execute(w, struct {
 		Posts     []Post
 		Me        User
 		CSRFToken string
 		Flash     string
 	}{posts, me, csrfToken, getFlash(w, r, "notice")})
 }
+
+var getIndexTemplate = template.Must(template.New("layout.html").Funcs(template.FuncMap{
+	"imageURL": imageURL,
+}).ParseFiles(
+	getTemplPath("layout.html"),
+	getTemplPath("index.html"),
+	getTemplPath("posts.html"),
+	getTemplPath("post.html"),
+))
 
 func getAccountName(w http.ResponseWriter, r *http.Request) {
 	accountName := chi.URLParam(r, "accountName")
@@ -665,16 +666,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("user.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	getAccountNameTmpl.Execute(w, struct {
 		Posts          []Post
 		User           User
 		PostCount      int
@@ -683,6 +675,15 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		Me             User
 	}{posts, user, postCount, commentCount, commentedCount, me})
 }
+
+var getAccountNameTmpl = template.Must(template.New("layout.html").Funcs(template.FuncMap{
+	"imageURL": imageURL,
+}).ParseFiles(
+	getTemplPath("layout.html"),
+	getTemplPath("user.html"),
+	getTemplPath("posts.html"),
+	getTemplPath("post.html"),
+))
 
 func getPosts(w http.ResponseWriter, r *http.Request) {
 	m, err := url.ParseQuery(r.URL.RawQuery)
@@ -746,15 +747,15 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, posts)
+	getPostTmpl.Execute(w, posts)
 }
+
+var getPostTmpl = template.Must(template.New("posts.html").Funcs(template.FuncMap{
+	"imageURL": imageURL,
+}).ParseFiles(
+	getTemplPath("posts.html"),
+	getTemplPath("post.html"),
+))
 
 func getPostsID(w http.ResponseWriter, r *http.Request) {
 	pidStr := chi.URLParam(r, "id")
@@ -786,19 +787,19 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("post_id.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	getPostIDTmpl.Execute(w, struct {
 		Post Post
 		Me   User
 	}{p, me})
 }
+
+var getPostIDTmpl = template.Must(template.New("layout.html").Funcs(template.FuncMap{
+	"imageURL": imageURL,
+}).ParseFiles(
+	getTemplPath("layout.html"),
+	getTemplPath("post_id.html"),
+	getTemplPath("post.html"),
+))
 
 func postIndex(w http.ResponseWriter, r *http.Request) {
 	me := getSessionUser(r)
@@ -1118,6 +1119,7 @@ func main() {
 	r.Get("/admin/banned", getAdminBanned)
 	r.Post("/admin/banned", postAdminBanned)
 	r.Get(`/@{accountName:[a-zA-Z]+}`, getAccountName)
+	r.Get("/debug/pprof/*", http.DefaultServeMux.ServeHTTP)
 	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 		http.FileServer(http.Dir("../public")).ServeHTTP(w, r)
 	})
