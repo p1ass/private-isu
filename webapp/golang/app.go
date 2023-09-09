@@ -16,11 +16,12 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"html/template"
-	"io"
+	io "io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -352,16 +353,27 @@ func getInitialize(w http.ResponseWriter, r *http.Request) {
 
 	// 各ファイルを削除
 	for _, file := range files {
-		filePath := filepath.Join("/home/image", file.Name())
-		err := os.Remove(filePath)
-		if err != nil {
-			fmt.Println("Error deleting file:", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+		if !file.IsDir() {
+			filePath := filepath.Join("/home/image", file.Name())
+			err := os.Remove(filePath)
+			if err != nil {
+				fmt.Println("Error deleting file:", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 		}
 	}
 
 	dbInitialize()
+
+	cmd := exec.Command("cp", "-r", "/home/image/init/", "/home/image/")
+	err = cmd.Run()
+	if err != nil {
+		fmt.Println("Error copying directory:", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
