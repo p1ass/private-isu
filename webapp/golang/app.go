@@ -319,7 +319,7 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 
 		p.Comments = comments
 
-		err = db.GetContext(ctx, &p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
+		err = db.GetContext(ctx, &p.User, "SELECT * FROM `users` WHERE `id` = ? LIMIT 1", p.UserID)
 		if err != nil {
 			return nil, err
 		}
@@ -476,7 +476,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 
 	exists := 0
 	// ユーザーが存在しない場合はエラーになるのでエラーチェックはしない
-	db.GetContext(r.Context(), &exists, "SELECT 1 FROM users WHERE `account_name` = ?", accountName)
+	db.GetContext(r.Context(), &exists, "SELECT 1 FROM users WHERE `account_name` = ? LIMIT 1", accountName)
 
 	if exists == 1 {
 		session := getSession(r)
@@ -766,7 +766,7 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.SelectContext(r.Context(), &results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	err = db.SelectContext(r.Context(), &results, "SELECT * FROM `posts` WHERE `id` = ? LIMIT 1", pid)
 	if err != nil {
 		log.Print(err)
 		return
@@ -911,7 +911,7 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	post := Post{}
-	err = db.GetContext(r.Context(), &post, "SELECT `mime`, `imgdata` FROM `posts` WHERE `id` = ?", pid)
+	err = db.GetContext(r.Context(), &post, "SELECT `mime`, `imgdata` FROM `posts` WHERE `id` = ? LIMIT 1", pid)
 	if err != nil {
 		log.Print(err)
 		return
