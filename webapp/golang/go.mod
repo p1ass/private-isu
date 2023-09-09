@@ -22,6 +22,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gorilla/securecookie v1.1.1 // indirect
 	github.com/memcachier/mc v2.0.1+incompatible // indirect
+	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	go.opentelemetry.io/contrib v1.18.0 // indirect
 	go.opentelemetry.io/otel/metric v1.17.0 // indirect
 	go.opentelemetry.io/otel/trace v1.17.0 // indirect

@@ -6,6 +6,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
+	"github.com/catatsuy/private-isu/webapp/golang/isucache"
 	"github.com/catatsuy/private-isu/webapp/golang/sqlc"
 	"github.com/riandyrn/otelchi"
 	"github.com/uptrace/opentelemetry-go-extra/otelsql"
@@ -24,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -220,10 +222,17 @@ func makeRecentPosts(ctx context.Context, results []Post) ([]Post, error) {
 		}
 		p.Comments = comments
 
-		err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
+		counts, ok := commentCountByPostID.Value(strconv.Itoa(p.ID))
+		if ok {
+			p.CommentCount = counts
+		} else {
+			err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+			if err != nil {
+				return nil, err
+			}
+			commentCountByPostID.Set(strconv.Itoa(p.ID), p.CommentCount)
 		}
+
 	}
 
 	return results, nil
@@ -245,9 +254,15 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 	var posts []Post
 
 	for _, p := range results {
-		err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
+		counts, ok := commentCountByPostID.Value(strconv.Itoa(p.ID))
+		if ok {
+			p.CommentCount = counts
+		} else {
+			err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+			if err != nil {
+				return nil, err
+			}
+			commentCountByPostID.Set(strconv.Itoa(p.ID), p.CommentCount)
 		}
 
 		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
@@ -255,7 +270,7 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 			query += " LIMIT 3"
 		}
 		var comments []Comment
-		err = db.SelectContext(ctx, &comments, query, p.ID)
+		err := db.SelectContext(ctx, &comments, query, p.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -360,6 +375,8 @@ func getTemplPath(filename string) string {
 }
 
 func getInitialize(w http.ResponseWriter, r *http.Request) {
+	bothInit()
+
 	// ディレクトリ内のファイル一覧を取得
 	files, err := os.ReadDir("/home/image")
 	if err != nil {
@@ -954,6 +971,8 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	commentCountByPostID.Inc(strconv.Itoa(postID))
+
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
 
@@ -1018,7 +1037,18 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
 
+var commentCountByPostID = &isucache.SafeCounter{
+	V:   map[string]int{},
+	Mux: sync.Mutex{},
+}
+
+// 👹main関数からとpostInitialize両方から呼び出されるところに書かなければならない
+func bothInit() {
+	commentCountByPostID.Reset()
+}
+
 func main() {
+	bothInit()
 	tp, err := initializeTracerProvider()
 	if err != nil {
 		log.Fatalf("Failed to initialize tracer provider: %v", err)
@@ -1102,7 +1132,7 @@ func initializeTracerProvider() (*sdktrace.TracerProvider, error) {
 	}
 
 	tracerProviderOptions := []sdktrace.TracerProviderOption{
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(1))),
+		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.01))),
 		sdktrace.WithResource(res),
 	}
 
