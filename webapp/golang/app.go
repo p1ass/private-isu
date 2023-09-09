@@ -505,12 +505,16 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tracer := otel.Tracer("getIndex")
+	_, span := tracer.Start(r.Context(), "templateExecute")
+
 	getIndexTemplate.Execute(w, struct {
 		Posts     []Post
 		Me        User
 		CSRFToken string
 		Flash     string
 	}{posts, me, csrfToken, getFlash(w, r, "notice")})
+	span.End()
 }
 
 var getIndexTemplate = template.Must(template.New("layout.html").Funcs(template.FuncMap{
@@ -592,25 +596,13 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 	}
 	postCount := len(postIDs)
 
-	// TODO: アプリケーションがわ で計算できそう
 	commentedCount := 0
 	if postCount > 0 {
-		s := []string{}
-		for range postIDs {
-			s = append(s, "?")
-		}
-		placeholder := strings.Join(s, ", ")
-
-		// convert []int -> []interface{}
-		args := make([]interface{}, len(postIDs))
-		for i, v := range postIDs {
-			args[i] = v
-		}
-
-		err = db.GetContext(r.Context(), &commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...)
-		if err != nil {
-			log.Print(err)
-			return
+		for _, postID := range postIDs {
+			v, ok := commentCountByPostID.Value(strconv.Itoa(postID))
+			if ok {
+				commentedCount += v
+			}
 		}
 	}
 
@@ -788,6 +780,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
+	defer file.Close()
 
 	mime := ""
 	ext := ""
@@ -813,13 +806,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	filedata, err := io.ReadAll(file)
-	if err != nil {
-		log.Print(err)
-		return
-	}
-
-	if len(filedata) > UploadLimit {
+	if header.Size > UploadLimit {
 		session := getSession(r)
 		session.Values["notice"] = "ファイルサイズが大きすぎます"
 		session.Save(r, w)
@@ -859,11 +846,14 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 
 	}
 	defer f.Close()
-	_, err = f.Write(filedata)
+
+	_, err = io.Copy(f, file)
 	if err != nil {
 		log.Print(err)
 		return
 	}
+
+	commentCountByPostID.Set(strconv.Itoa(int(pid)), 0)
 
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
@@ -895,18 +885,20 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		f, err := os.Create(fmt.Sprintf("/home/image/%d.%s", pid, ext))
-		if err != nil {
-			log.Print(err)
-			return
+		go func() {
+			f, err := os.Create(fmt.Sprintf("/home/image/%d.%s", pid, ext))
+			if err != nil {
+				log.Print(err)
+				return
 
-		}
-		defer f.Close()
-		_, err = f.Write(post.Imgdata)
-		if err != nil {
-			log.Print(err)
-			return
-		}
+			}
+			defer f.Close()
+			_, err = f.Write(post.Imgdata)
+			if err != nil {
+				log.Print(err)
+				return
+			}
+		}()
 		return
 	}
 
