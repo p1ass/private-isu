@@ -11,7 +11,6 @@ import (
 	"github.com/catatsuy/private-isu/webapp/golang/isucache"
 	"github.com/catatsuy/private-isu/webapp/golang/sqlc"
 	"github.com/riandyrn/otelchi"
-	"github.com/uptrace/opentelemetry-go-extra/otelsql"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/propagation"
@@ -1040,15 +1039,15 @@ func bothInit() {
 
 func main() {
 	bothInit()
-	tp, err := initializeTracerProvider()
-	if err != nil {
-		log.Fatalf("Failed to initialize tracer provider: %v", err)
-	}
-	defer func() {
-		if err := tp.Shutdown(context.Background()); err != nil {
-			log.Printf("Error shutting down tracer provider: %v", err)
-		}
-	}()
+	// tp, err := initializeTracerProvider()
+	// if err != nil {
+	// 	log.Fatalf("Failed to initialize tracer provider: %v", err)
+	// }
+	// defer func() {
+	// 	if err := tp.Shutdown(context.Background()); err != nil {
+	// 		log.Printf("Error shutting down tracer provider: %v", err)
+	// 	}
+	// }()
 
 	host := os.Getenv("ISUCONP_DB_HOST")
 	if host == "" {
@@ -1058,7 +1057,7 @@ func main() {
 	if port == "" {
 		port = "3306"
 	}
-	_, err = strconv.Atoi(port)
+	_, err := strconv.Atoi(port)
 	if err != nil {
 		log.Fatalf("Failed to read DB port number from an environment variable ISUCONP_DB_PORT.\nError: %s", err.Error())
 	}
@@ -1081,10 +1080,14 @@ func main() {
 		dbname,
 	)
 
-	stdDb, err := otelsql.Open("mysql", dsn, otelsql.WithDBName("mysql"))
+	stdDb, err := sql.Open("mysql", dsn)
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
+	// stdDb, err := otelsql.Open("mysql", dsn, otelsql.WithDBName("mysql"))
+	// if err != nil {
+	// 	log.Fatalf("Failed to connect to DB: %s.", err.Error())
+	// }
 	stdDb.SetMaxIdleConns(10)
 	stdDb.SetMaxOpenConns(10)
 	db = sqlx.NewDb(stdDb, "mysql")
