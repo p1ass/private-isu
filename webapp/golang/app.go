@@ -108,10 +108,12 @@ func dbInitialize() {
 
 func tryLogin(ctx context.Context, accountName, password string) *User {
 	u := User{}
-	err := db.GetContext(ctx, &u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0", accountName)
+	err := db.GetContext(ctx, &u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0 LIMIT 1", accountName)
 	if err != nil {
 		return nil
 	}
+
+	userByID.Set(strconv.Itoa(u.ID), u)
 
 	if calculatePasshash(u.AccountName, password) == u.Passhash {
 		return &u
@@ -160,14 +162,28 @@ func getSessionUser(r *http.Request) User {
 		return User{}
 	}
 
-	u := User{}
-
-	err := db.GetContext(r.Context(), &u, "SELECT * FROM `users` WHERE `id` = ? LIMIT 1", uid)
-	if err != nil {
-		return User{}
+	var id int
+	switch uid.(type) {
+	case int:
+		id = uid.(int)
+	case int64:
+		id = int(uid.(int64))
 	}
 
-	return u
+	u, ok := userByID.Get(strconv.Itoa(id))
+	if ok {
+		return u
+	} else {
+		u := User{}
+
+		err := db.GetContext(r.Context(), &u, "SELECT * FROM `users` WHERE `id` = ? LIMIT 1", uid)
+		if err != nil {
+			return User{}
+		}
+		userByID.Set(strconv.Itoa(u.ID), u)
+		return u
+	}
+
 }
 
 func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
@@ -438,7 +454,8 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := "INSERT INTO `users` (`account_name`, `passhash`) VALUES (?,?)"
-	result, err := db.ExecContext(r.Context(), query, accountName, calculatePasshash(accountName, password))
+	passhash := calculatePasshash(accountName, password)
+	result, err := db.ExecContext(r.Context(), query, accountName, passhash)
 	if err != nil {
 		log.Print(err)
 		return
@@ -453,6 +470,15 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	session.Values["user_id"] = uid
 	session.Values["csrf_token"] = secureRandomStr(16)
 	session.Save(r, w)
+
+	userByID.Set(strconv.Itoa(int(uid)), User{
+		ID:          int(uid),
+		AccountName: accountName,
+		Passhash:    passhash,
+		Authority:   0,
+		DelFlg:      0,
+		CreatedAt:   time.Time{}, // 使わないので何でも良い
+	})
 
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -540,6 +566,8 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
+	userByID.Set(strconv.Itoa(user.ID), user)
 
 	results := []Post{}
 
@@ -991,6 +1019,7 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 
 	for _, id := range r.Form["uid[]"] {
 		db.ExecContext(r.Context(), query, 1, id)
+		userByID.Delete(id)
 	}
 
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
@@ -1001,9 +1030,12 @@ var commentCountByPostID = &isucache.SafeCounter{
 	Mux: sync.Mutex{},
 }
 
+var userByID = isucache.NewCache[User]()
+
 // 👹main関数からとpostInitialize両方から呼び出されるところに書かなければならない
 func bothInit() {
 	commentCountByPostID.Reset()
+	userByID.Flush()
 }
 
 func main() {

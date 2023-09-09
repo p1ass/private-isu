@@ -31,6 +31,10 @@ func (c *Cache[V]) Set(k string, v V) {
 	c.cache.Set(k, v, cache.DefaultExpiration)
 }
 
+func (c *Cache[V]) Delete(k string) {
+	c.cache.Delete(k)
+}
+
 func (c *Cache[V]) SetWithExpire(k string, v V, d time.Duration) {
 	c.cache.Set(k, v, d)
 }
