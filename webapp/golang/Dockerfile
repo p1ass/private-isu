@@ -8,5 +8,5 @@ COPY go.sum /home/webapp
 RUN go mod download
 
 COPY . /home/webapp
-RUN go build -o app
+RUN go build -ldflags "-X main.gitBranchName=master" -o app
 CMD ./app

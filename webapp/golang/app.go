@@ -11,8 +11,11 @@ import (
 	"github.com/catatsuy/private-isu/webapp/golang/isucache"
 	"github.com/catatsuy/private-isu/webapp/golang/sqlc"
 	"github.com/riandyrn/otelchi"
+	"github.com/uptrace/opentelemetry-go-extra/otelsql"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"html/template"
@@ -1051,15 +1054,15 @@ func bothInit() {
 
 func main() {
 	bothInit()
-	// tp, err := initializeTracerProvider()
-	// if err != nil {
-	// 	log.Fatalf("Failed to initialize tracer provider: %v", err)
-	// }
-	// defer func() {
-	// 	if err := tp.Shutdown(context.Background()); err != nil {
-	// 		log.Printf("Error shutting down tracer provider: %v", err)
-	// 	}
-	// }()
+	tp, err := initializeTracerProvider()
+	if err != nil {
+		log.Fatalf("Failed to initialize tracer provider: %v", err)
+	}
+	defer func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			log.Printf("Error shutting down tracer provider: %v", err)
+		}
+	}()
 
 	host := os.Getenv("ISUCONP_DB_HOST")
 	if host == "" {
@@ -1069,7 +1072,7 @@ func main() {
 	if port == "" {
 		port = "3306"
 	}
-	_, err := strconv.Atoi(port)
+	_, err = strconv.Atoi(port)
 	if err != nil {
 		log.Fatalf("Failed to read DB port number from an environment variable ISUCONP_DB_PORT.\nError: %s", err.Error())
 	}
@@ -1092,14 +1095,14 @@ func main() {
 		dbname,
 	)
 
-	stdDb, err := sql.Open("mysql", dsn)
-	if err != nil {
-		log.Fatalf("Failed to connect to DB: %s.", err.Error())
-	}
-	// stdDb, err := otelsql.Open("mysql", dsn, otelsql.WithDBName("mysql"))
+	// stdDb, err := sql.Open("mysql", dsn)
 	// if err != nil {
 	// 	log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	// }
+	stdDb, err := otelsql.Open("mysql", dsn, otelsql.WithDBName("mysql"))
+	if err != nil {
+		log.Fatalf("Failed to connect to DB: %s.", err.Error())
+	}
 	stdDb.SetMaxIdleConns(10)
 	stdDb.SetMaxOpenConns(10)
 	db = sqlx.NewDb(stdDb, "mysql")
@@ -1132,25 +1135,28 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
 
+// go build -ldflags "-X main.gitBranchName=`git branch --contains | cut -d " " -f 2`"のような形で埋め込む
+var gitBranchName string
+
 func initializeTracerProvider() (*sdktrace.TracerProvider, error) {
-	res, err := resource.New(context.Background(), resource.WithTelemetrySDK())
+	res, err := resource.New(context.Background(),
+		resource.WithTelemetrySDK(),
+		resource.WithAttributes(attribute.String("git-branch", gitBranchName)))
 	if err != nil {
 		return nil, fmt.Errorf("faield to create resource: %w", err)
+	}
+
+	// OTEL_EXPORTER_OTLP_ENDPOINT のパスに対してTraceを送るクライアント
+	client := otlptracegrpc.NewClient()
+	exp, err := otlptrace.New(context.Background(), client)
+	if err != nil {
+		return nil, err
 	}
 
 	tracerProviderOptions := []sdktrace.TracerProviderOption{
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.01))),
 		sdktrace.WithResource(res),
-	}
-
-	// ローカルでJaegerが動いてる場合はJaegerにつなぐ
-	ep, ok := os.LookupEnv("JAEGER_ENDPOINT")
-	if ok {
-		exporter, err := jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(ep)))
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize jager: %w", err)
-		}
-		tracerProviderOptions = append(tracerProviderOptions, sdktrace.WithBatcher(exporter))
+		sdktrace.WithBatcher(exp),
 	}
 
 	tp := sdktrace.NewTracerProvider(tracerProviderOptions...)
