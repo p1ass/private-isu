@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -359,6 +360,24 @@ func getTemplPath(filename string) string {
 }
 
 func getInitialize(w http.ResponseWriter, r *http.Request) {
+	// ディレクトリ内のファイル一覧を取得
+	files, err := os.ReadDir("/home/image")
+	if err != nil {
+		fmt.Println("Error reading directory:", err)
+		return
+	}
+
+	// 各ファイルを削除
+	for _, file := range files {
+		filePath := filepath.Join("/home/image", file.Name())
+		err := os.Remove(filePath)
+		if err != nil {
+			fmt.Println("Error deleting file:", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	}
+
 	dbInitialize()
 	w.WriteHeader(http.StatusOK)
 }
@@ -787,15 +806,19 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mime := ""
+	ext := ""
 	if file != nil {
 		// 投稿のContent-Typeからファイルのタイプを決定する
 		contentType := header.Header["Content-Type"][0]
 		if strings.Contains(contentType, "jpeg") {
 			mime = "image/jpeg"
+			ext = ".jpg"
 		} else if strings.Contains(contentType, "png") {
 			mime = "image/png"
+			ext = ".png"
 		} else if strings.Contains(contentType, "gif") {
 			mime = "image/gif"
+			ext = ".gif"
 		} else {
 			session := getSession(r)
 			session.Values["notice"] = "投稿できる画像形式はjpgとpngとgifだけです"
@@ -821,12 +844,12 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := "INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)"
+	query := "INSERT INTO `posts` (`user_id`, `mime`,`imgdata` , `body`) VALUES (?,?,?, ?)"
 	result, err := db.ExecContext(r.Context(),
 		query,
 		me.ID,
 		mime,
-		filedata,
+		[]byte{},
 		r.FormValue("body"),
 	)
 	if err != nil {
@@ -835,6 +858,24 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pid, err := result.LastInsertId()
+	if err != nil {
+		log.Print(err)
+		return
+	}
+
+	err = os.MkdirAll("/home/image", 0777)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	f, err := os.Create(fmt.Sprintf("/home/image/%d%s", pid, ext))
+	if err != nil {
+		log.Print(err)
+		return
+
+	}
+	defer f.Close()
+	_, err = f.Write(filedata)
 	if err != nil {
 		log.Print(err)
 		return
@@ -852,7 +893,7 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	post := Post{}
-	err = db.GetContext(r.Context(), &post, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	err = db.GetContext(r.Context(), &post, "SELECT `mime`, `imgdata` FROM `posts` WHERE `id` = ?", pid)
 	if err != nil {
 		log.Print(err)
 		return
@@ -865,6 +906,19 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 		ext == "gif" && post.Mime == "image/gif" {
 		w.Header().Set("Content-Type", post.Mime)
 		_, err := w.Write(post.Imgdata)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+
+		f, err := os.Create(fmt.Sprintf("/home/image/%d.%s", pid, ext))
+		if err != nil {
+			log.Print(err)
+			return
+
+		}
+		defer f.Close()
+		_, err = f.Write(post.Imgdata)
 		if err != nil {
 			log.Print(err)
 			return
