@@ -20,3 +20,17 @@ FROM posts as p
 WHERE u.id =?
 ORDER BY p.created_at DESC
 LIMIT ?;
+
+-- name: GetComments :many
+SELECT c.id, c.post_id, c.user_id, c.comment, c.created_at, u.account_name, u.authority, u.del_flg FROM comments as c
+LEFT JOIN users u on u.id = c.user_id
+WHERE post_id = ?
+ORDER BY c.created_at ASC;
+
+-- name: GetPost :one
+SELECT p.id, p.user_id, p.mime, p.body, p.created_at,
+       account_name, passhash, authority, del_flg
+FROM posts as p
+         LEFT JOIN users u force index (users_del_flg_index) on u.id = p.user_id
+WHERE p.id = ? AND u.del_flg = 0
+LIMIT 1;

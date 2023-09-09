@@ -4,7 +4,9 @@ import (
 	"context"
 	crand "crypto/rand"
 	"crypto/sha512"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/catatsuy/private-isu/webapp/golang/isucache"
 	"github.com/catatsuy/private-isu/webapp/golang/sqlc"
@@ -244,90 +246,45 @@ func boolToInt(b bool) int {
 // 指定したユーザー全ての投稿をcreated at descで取得する allComments:false getAccountName
 // 指定した日付より古い投稿をcreated at descで取得する allComments:false getPosts
 // 指定したPostIDの投稿を1つ取得する allComments:true getPostsID
-func makePosts(ctx context.Context, results []Post, csrfToken string, allComments bool) ([]Post, error) {
-	var posts []Post
+func makePosts(ctx context.Context, result Post) (Post, error) {
 
-	for _, p := range results {
-		counts, ok := commentCountByPostID.Value(strconv.Itoa(p.ID))
-		if ok {
-			p.CommentCount = counts
-		} else {
-			err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-			if err != nil {
-				return nil, err
-			}
-			commentCountByPostID.Set(strconv.Itoa(p.ID), p.CommentCount)
-		}
-
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
-		if !allComments {
-			query += " LIMIT 3"
-		}
-		var comments []Comment
-		err := db.SelectContext(ctx, &comments, query, p.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		var userIDs []int
-		for _, c := range comments {
-			userIDs = append(userIDs, c.UserID)
-		}
-		// unique
-		m := map[int]struct{}{}
-		for _, id := range userIDs {
-			m[id] = struct{}{}
-		}
-		userIDs = []int{}
-		for id := range m {
-			userIDs = append(userIDs, id)
-		}
-
-		if len(userIDs) > 0 {
-			var users []User
-			q, parm, err := sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIDs)
-			if err != nil {
-				return nil, err
-			}
-			err = db.SelectContext(ctx, &users, q, parm...)
-			if err != nil {
-				return nil, err
-			}
-
-			// map
-			userMap := map[int]User{}
-			for _, u := range users {
-				userMap[u.ID] = u
-			}
-
-			for i := 0; i < len(comments); i++ {
-				comments[i].User = userMap[comments[i].UserID]
-			}
-		}
-
-		// reverse
-		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
-			comments[i], comments[j] = comments[j], comments[i]
-		}
-
-		p.Comments = comments
-
-		err = db.GetContext(ctx, &p.User, "SELECT * FROM `users` WHERE `id` = ? LIMIT 1", p.UserID)
-		if err != nil {
-			return nil, err
-		}
-
-		p.CSRFToken = csrfToken
-
-		if p.User.DelFlg == 0 {
-			posts = append(posts, p)
-		}
-		if len(posts) >= postsPerPage {
-			break
-		}
+	postComments, err := sqlc.New(db).GetComments(ctx, int32(result.ID))
+	if err != nil {
+		return Post{}, err
 	}
 
-	return posts, nil
+	var comments []Comment
+	for _, c := range postComments {
+		comments = append(comments, Comment{
+			ID:        int(c.ID),
+			PostID:    int(c.PostID),
+			UserID:    int(c.UserID),
+			Comment:   c.Comment,
+			CreatedAt: c.CreatedAt,
+			User: User{
+				ID:          int(c.UserID),
+				AccountName: c.AccountName.String,
+				Passhash:    "",
+				Authority:   boolToInt(c.Authority.Bool),
+				DelFlg:      boolToInt(c.DelFlg.Bool),
+				CreatedAt:   time.Time{},
+			},
+		})
+	}
+	result.Comments = comments
+
+	counts, ok := commentCountByPostID.Value(strconv.Itoa(result.ID))
+	if ok {
+		result.CommentCount = counts
+	} else {
+		err := db.GetContext(ctx, &result.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", result.ID)
+		if err != nil {
+			return Post{}, err
+		}
+		commentCountByPostID.Set(strconv.Itoa(result.ID), result.CommentCount)
+	}
+
+	return result, nil
 }
 
 func imageURL(p Post) string {
@@ -758,32 +715,48 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := []Post{}
-	err = db.SelectContext(r.Context(), &results, "SELECT * FROM `posts` WHERE `id` = ? LIMIT 1", pid)
+	result, err := sqlc.New(db).GetPost(r.Context(), int32(pid))
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		log.Print(err)
 		return
 	}
 
-	posts, err := makePosts(r.Context(), results, getCSRFToken(r), true)
+	post := Post{
+		ID:           int(result.ID),
+		UserID:       int(result.UserID),
+		Imgdata:      nil,
+		Body:         result.Body,
+		Mime:         result.Mime,
+		CreatedAt:    time.Time{},
+		CommentCount: 0,
+		Comments:     nil,
+		User: User{
+			ID:          int(result.UserID),
+			AccountName: result.AccountName,
+			Passhash:    result.Passhash,
+			Authority:   boolToInt(result.Authority),
+			DelFlg:      boolToInt(result.DelFlg),
+			CreatedAt:   time.Time{}, // 不要
+		},
+		CSRFToken: getCSRFToken(r),
+	}
+
+	post, err = makePosts(r.Context(), post)
 	if err != nil {
 		log.Print(err)
 		return
 	}
-
-	if len(posts) == 0 {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	p := posts[0]
 
 	me := getSessionUser(r)
 
 	getPostIDTmpl.Execute(w, struct {
 		Post Post
 		Me   User
-	}{p, me})
+	}{post, me})
 }
 
 var getPostIDTmpl = template.Must(template.New("layout.html").Funcs(template.FuncMap{

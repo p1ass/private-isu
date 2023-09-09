@@ -12,6 +12,94 @@ import (
 	"time"
 )
 
+const getComments = `-- name: GetComments :many
+SELECT c.id, c.post_id, c.user_id, c.comment, c.created_at, u.account_name, u.authority, u.del_flg FROM comments as c
+LEFT JOIN users u on u.id = c.user_id
+WHERE post_id = ?
+ORDER BY c.created_at ASC
+`
+
+type GetCommentsRow struct {
+	ID          int32
+	PostID      int32
+	UserID      int32
+	Comment     string
+	CreatedAt   time.Time
+	AccountName sql.NullString
+	Authority   sql.NullBool
+	DelFlg      sql.NullBool
+}
+
+func (q *Queries) GetComments(ctx context.Context, postID int32) ([]GetCommentsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getComments, postID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetCommentsRow
+	for rows.Next() {
+		var i GetCommentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PostID,
+			&i.UserID,
+			&i.Comment,
+			&i.CreatedAt,
+			&i.AccountName,
+			&i.Authority,
+			&i.DelFlg,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getPost = `-- name: GetPost :one
+SELECT p.id, p.user_id, p.mime, p.body, p.created_at,
+       account_name, passhash, authority, del_flg
+FROM posts as p
+         LEFT JOIN users u force index (users_del_flg_index) on u.id = p.user_id
+WHERE p.id = ? AND u.del_flg = 0
+LIMIT 1
+`
+
+type GetPostRow struct {
+	ID          int32
+	UserID      int32
+	Mime        string
+	Body        string
+	CreatedAt   time.Time
+	AccountName string
+	Passhash    string
+	Authority   bool
+	DelFlg      bool
+}
+
+func (q *Queries) GetPost(ctx context.Context, id int32) (GetPostRow, error) {
+	row := q.db.QueryRowContext(ctx, getPost, id)
+	var i GetPostRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Mime,
+		&i.Body,
+		&i.CreatedAt,
+		&i.AccountName,
+		&i.Passhash,
+		&i.Authority,
+		&i.DelFlg,
+	)
+	return i, err
+}
+
 const getPostRecentCommentsAndUser = `-- name: GetPostRecentCommentsAndUser :many
 SELECT ranked.id, ranked.post_id, ranked.created_at, ranked.comment, ranked.user_id, CAST(ranking as UNSIGNED ),
     u.account_name, u.authority, u.del_flg
